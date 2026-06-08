@@ -1,0 +1,3054 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0D0510" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>VitalTrack</title>
+  <style>
+    body { margin: 0; background: #0D0510; -webkit-font-smoothing: antialiased; }
+    #root { min-height: 100vh; }
+  </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const { useState, useEffect, useRef } = React;
+  </script>
+  <script>
+// ─── USUARIOS AUTORIZADOS ─────────────────────────────────────
+const USERS = {
+  "3124217452": {
+    name: "Newer Martinez",
+    id: "3124217452"
+  },
+  "3134610104": {
+    name: "Newer Martinez",
+    id: "3134610104"
+  }
+};
+
+// ─── GOOGLE SHEETS WEBHOOK ────────────────────────────────────
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycbySXcgunFmxdViQGj_WbmoJt5Vl-Y5sHph43urGZHxQUe2j1gpMdGC0S0l_ww3rXAWX1w/exec";
+async function syncToSheets(userId, userName, type, date, payload) {
+  try {
+    await fetch(SHEETS_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        userId,
+        userName,
+        type,
+        date,
+        payload
+      })
+    });
+  } catch {}
+}
+
+// ─── STORAGE ──────────────────────────────────────────────────
+const SESSION_KEY = "vitaltrack_session";
+const WEEKLY_GOALS_KEY = "vitaltrack_weekly_goals"; // compartido entre usuarios
+
+function storageKey(userId) {
+  return `vitaltrack_${userId}`;
+}
+const defaultState = {
+  goals: {
+    currentWeight: "",
+    targetWeight: "",
+    dailyCalories: 1800,
+    protein: 120,
+    carbs: 200,
+    fats: 60,
+    activityLevel: "moderado"
+  },
+  weightLog: [],
+  meals: {},
+  exercise: {}
+};
+const defaultWeeklyGoals = {
+  calories: {
+    enabled: true,
+    target: 1800,
+    days: 5
+  },
+  exercise: {
+    enabled: true,
+    daysPerWeek: 4
+  },
+  weight: {
+    enabled: true,
+    kgPerWeek: 0.5
+  },
+  macros: {
+    enabled: true,
+    proteinPct: 80,
+    carbsPct: 80,
+    fatsPct: 80
+  },
+  weekStart: null,
+  results: {}
+};
+function loadData(userId) {
+  try {
+    const r = localStorage.getItem(storageKey(userId));
+    return r ? {
+      ...defaultState,
+      ...JSON.parse(r)
+    } : defaultState;
+  } catch {
+    return defaultState;
+  }
+}
+function saveData(userId, data) {
+  try {
+    localStorage.setItem(storageKey(userId), JSON.stringify(data));
+  } catch {}
+}
+function loadSession() {
+  try {
+    const r = localStorage.getItem(SESSION_KEY);
+    return r ? JSON.parse(r) : null;
+  } catch {
+    return null;
+  }
+}
+function saveSession(u) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(u));
+  } catch {}
+}
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {}
+}
+function loadWeeklyGoals() {
+  try {
+    const r = localStorage.getItem(WEEKLY_GOALS_KEY);
+    return r ? {
+      ...defaultWeeklyGoals,
+      ...JSON.parse(r)
+    } : defaultWeeklyGoals;
+  } catch {
+    return defaultWeeklyGoals;
+  }
+}
+function saveWeeklyGoals(wg) {
+  try {
+    localStorage.setItem(WEEKLY_GOALS_KEY, JSON.stringify(wg));
+  } catch {}
+}
+function todayKey() {
+  return new Date().toISOString().split("T")[0];
+}
+
+// Devuelve lunes de la semana actual
+function getWeekStart() {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d.toISOString().split("T")[0];
+}
+
+// Devuelve array de fechas de la semana actual (lun-dom)
+function getWeekDays() {
+  const start = new Date(getWeekStart() + "T00:00:00");
+  return Array.from({
+    length: 7
+  }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    return d.toISOString().split("T")[0];
+  });
+}
+
+// ─── TEXTOS DE PREMIOS Y CASTIGOS ─────────────────────────────
+const REWARDS = {
+  calories: {
+    win: "🥰 ¡Mi amor, lo logramos! Controlamos las calorías toda la semana — nos merecemos una comida trampa juntos",
+    lose: "😅 Uy mi amor... nos pasamos del límite esta semana. ¡La próxima nos portamos bien, lo prometo!"
+  },
+  exercise: {
+    win: "💪 ¡Somos imparables! Cumplimos todos los días de ejercicio — merecemos un día de sofá y películas",
+    lose: "🙈 Rayos, fallamos en el ejercicio... pero no pasa nada, la próxima semana nos desquitamos juntos"
+  },
+  weight: {
+    win: "😍 ¡Mirá ese progreso! Bajamos el peso que nos propusimos — estamos que nos comemos el mundo",
+    lose: "😬 El peso no bajó lo que queríamos — pero seguimos en esto, ¡juntos podemos más!"
+  },
+  macros: {
+    win: "🎯 ¡Qué disciplina la nuestra! Cumplimos los macros perfectos — este cuerpo está respondiendo de lujo",
+    lose: "🤭 Ay no, los macros nos ganaron esta semana. Toca esforzarse más mi vida, ¡tú puedes!"
+  }
+};
+
+// ─── EVALUADOR AUTOMÁTICO DE METAS ───────────────────────────
+function evaluateWeeklyGoals(weeklyGoals, allUsersData) {
+  const weekDays = getWeekDays();
+  const results = {};
+
+  // Combinar datos de ambos usuarios
+  const combined = {
+    meals: {},
+    exercise: {},
+    weightLog: []
+  };
+  Object.values(allUsersData).forEach(ud => {
+    if (!ud) return;
+    weekDays.forEach(d => {
+      if (ud.meals?.[d]) combined.meals[d] = [...(combined.meals[d] || []), ...(ud.meals[d] || [])];
+      if (ud.exercise?.[d]) combined.exercise[d] = ud.exercise[d]; // ejercicio es individual
+    });
+    if (ud.weightLog) combined.weightLog.push(...ud.weightLog);
+  });
+
+  // ── Calorías ──
+  if (weeklyGoals.calories.enabled) {
+    const daysChecked = weekDays.filter(d => (combined.meals[d] || []).length > 0);
+    const daysMet = daysChecked.filter(d => {
+      const total = (combined.meals[d] || []).reduce((s, m) => s + (m.calories || 0), 0);
+      return total <= weeklyGoals.calories.target;
+    });
+    const passed = daysChecked.length >= weeklyGoals.calories.days && daysMet.length >= weeklyGoals.calories.days;
+    results.calories = {
+      passed,
+      daysMet: daysMet.length,
+      daysTracked: daysChecked.length,
+      needed: weeklyGoals.calories.days
+    };
+  }
+
+  // ── Ejercicio ──
+  if (weeklyGoals.exercise.enabled) {
+    const daysWithExercise = weekDays.filter(d => {
+      const ex = combined.exercise[d];
+      return ex && (ex.completed || ex.logged && ex.logged.length > 0);
+    });
+    const passed = daysWithExercise.length >= weeklyGoals.exercise.daysPerWeek;
+    results.exercise = {
+      passed,
+      daysDone: daysWithExercise.length,
+      needed: weeklyGoals.exercise.daysPerWeek
+    };
+  }
+
+  // ── Peso ──
+  if (weeklyGoals.weight.enabled) {
+    const weekStart = getWeekStart();
+    const weekLogs = combined.weightLog.filter(w => w.date >= weekStart && w.date <= weekDays[6]).sort((a, b) => a.date.localeCompare(b.date));
+    if (weekLogs.length >= 2) {
+      const diff = weekLogs[0].weight - weekLogs[weekLogs.length - 1].weight;
+      const passed = diff >= weeklyGoals.weight.kgPerWeek;
+      results.weight = {
+        passed,
+        diff: diff.toFixed(1),
+        needed: weeklyGoals.weight.kgPerWeek
+      };
+    } else {
+      results.weight = {
+        passed: null,
+        diff: null,
+        needed: weeklyGoals.weight.kgPerWeek
+      };
+    }
+  }
+
+  // ── Macros ──
+  if (weeklyGoals.macros.enabled) {
+    const daysTracked = weekDays.filter(d => (combined.meals[d] || []).length > 0);
+    const daysMet = daysTracked.filter(d => {
+      const meals = combined.meals[d] || [];
+      const protein = meals.reduce((s, m) => s + (m.protein || 0), 0);
+      const carbs = meals.reduce((s, m) => s + (m.carbs || 0), 0);
+      const fats = meals.reduce((s, m) => s + (m.fats || 0), 0);
+      // Se considera cumplido si se registró comida (simplificado)
+      return protein > 0 || carbs > 0 || fats > 0;
+    });
+    const passed = daysTracked.length >= 5 && daysMet.length >= 5;
+    results.macros = {
+      passed,
+      daysMet: daysMet.length,
+      daysTracked: daysTracked.length
+    };
+  }
+  return results;
+}
+
+// ─── COLORES ──────────────────────────────────────────────────
+const ACCENT = "#FF2D6B";
+const ACCENT2 = "#FFD600";
+const ACCENT3 = "#B026FF";
+const BG = "#0D0510";
+const CARD = "#160D1E";
+const CARD2 = "#1E1130";
+const TEXT = "#FFF0F5";
+const MUTED = "#8B6A9A";
+
+// ─── APP ROOT ─────────────────────────────────────────────────
+function App() {
+  const [user, setUser] = useState(() => loadSession());
+  const [tab, setTab] = useState("dashboard");
+  const [data, setData] = useState(() => user ? loadData(user.id) : defaultState);
+  const [weeklyGoals, setWeeklyGoals] = useState(() => loadWeeklyGoals());
+  useEffect(() => {
+    if (user) saveData(user.id, data);
+  }, [data, user]);
+  useEffect(() => {
+    saveWeeklyGoals(weeklyGoals);
+  }, [weeklyGoals]);
+  const update = fn => setData(prev => fn(prev));
+  const updateWeeklyGoals = fn => setWeeklyGoals(prev => fn(prev));
+  const handleLogin = u => {
+    setUser(u);
+    saveSession(u);
+    setData(loadData(u.id));
+    setWeeklyGoals(loadWeeklyGoals());
+    setTab("dashboard");
+  };
+  const handleLogout = () => {
+    clearSession();
+    setUser(null);
+    setData(defaultState);
+  };
+  if (!user) return /*#__PURE__*/React.createElement(LoginScreen, {
+    onLogin: handleLogin
+  });
+  const today = todayKey();
+  const todayMeals = data.meals[today] || [];
+  const todayExercise = data.exercise[today] || {
+    completed: false,
+    recommendation: null,
+    logged: []
+  };
+  const todayCalories = todayMeals.reduce((s, m) => s + (m.calories || 0), 0);
+  const todayCaloriesBurned = todayExercise.logged?.reduce((s, e) => s + (e.burned || 0), 0) || 0;
+
+  // Cargar datos del otro usuario para evaluación compartida
+  const otherUserId = Object.keys(USERS).find(id => id !== user.id);
+  const otherUserData = loadData(otherUserId);
+  const allUsersData = {
+    [user.id]: data,
+    [otherUserId]: otherUserData
+  };
+  const tabs = [{
+    id: "dashboard",
+    icon: "⬡",
+    label: "Inicio"
+  }, {
+    id: "food",
+    icon: "◎",
+    label: "Comida"
+  }, {
+    id: "exercise",
+    icon: "△",
+    label: "Ejercicio"
+  }, {
+    id: "metas",
+    icon: "★",
+    label: "Metas"
+  }, {
+    id: "goals",
+    icon: "◈",
+    label: "Objetivos"
+  }];
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: "'DM Sans', sans-serif",
+      background: BG,
+      minHeight: "100vh",
+      color: TEXT,
+      maxWidth: 430,
+      margin: "0 auto",
+      position: "relative",
+      paddingBottom: 90
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=Bebas+Neue&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 3px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #1E1130; border-radius: 10px; }
+        input, textarea, select { outline: none; }
+        button { cursor: pointer; border: none; }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes neonFlicker { 0%,100%{opacity:1;} 92%{opacity:1;} 93%{opacity:0.8;} 94%{opacity:1;} 96%{opacity:0.9;} 97%{opacity:1;} }
+        @keyframes neonPulse { 0%,100%{box-shadow:0 0 15px ${ACCENT}50,0 0 40px ${ACCENT}20;} 50%{box-shadow:0 0 30px ${ACCENT}80,0 0 80px ${ACCENT}40;} }
+        @keyframes confetti { 0%{transform:translateY(0) rotate(0deg);opacity:1;} 100%{transform:translateY(60px) rotate(360deg);opacity:0;} }
+        .fade-up { animation: fadeUp 0.4s ease forwards; }
+        .ring { animation: spin 1s linear infinite; }
+        .neon-title { animation: neonFlicker 4s infinite; }
+        .neon-btn { animation: neonPulse 2s infinite; }
+      `), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "16px 16px 0"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 10,
+      color: MUTED,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em"
+    }
+  }, "SESI\xD3N ACTIVA"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      color: ACCENT,
+      textShadow: `0 0 8px ${ACCENT}`
+    }
+  }, user.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: MUTED,
+      fontWeight: 400,
+      fontSize: 11
+    }
+  }, "\xB7 ", user.id))), /*#__PURE__*/React.createElement("button", {
+    onClick: handleLogout,
+    style: {
+      background: CARD2,
+      color: MUTED,
+      borderRadius: 8,
+      padding: "6px 12px",
+      fontSize: 11,
+      border: "1px solid #2D1040"
+    }
+  }, "Salir")), tab === "dashboard" && /*#__PURE__*/React.createElement(Dashboard, {
+    data: data,
+    today: today,
+    todayCalories: todayCalories,
+    todayCaloriesBurned: todayCaloriesBurned,
+    todayMeals: todayMeals,
+    todayExercise: todayExercise,
+    user: user,
+    weeklyGoals: weeklyGoals,
+    allUsersData: allUsersData
+  }), tab === "food" && /*#__PURE__*/React.createElement(FoodTab, {
+    data: data,
+    update: update,
+    today: today,
+    todayMeals: todayMeals,
+    todayCalories: todayCalories,
+    user: user
+  }), tab === "exercise" && /*#__PURE__*/React.createElement(ExerciseTab, {
+    data: data,
+    update: update,
+    today: today,
+    todayExercise: todayExercise,
+    user: user
+  }), tab === "metas" && /*#__PURE__*/React.createElement(MetasTab, {
+    weeklyGoals: weeklyGoals,
+    updateWeeklyGoals: updateWeeklyGoals,
+    allUsersData: allUsersData,
+    user: user
+  }), tab === "goals" && /*#__PURE__*/React.createElement(GoalsTab, {
+    data: data,
+    update: update,
+    user: user
+  }), /*#__PURE__*/React.createElement("nav", {
+    style: {
+      position: "fixed",
+      bottom: 0,
+      left: "50%",
+      transform: "translateX(-50%)",
+      width: "100%",
+      maxWidth: 430,
+      background: "rgba(13,5,16,0.97)",
+      backdropFilter: "blur(20px)",
+      borderTop: "1px solid #2D1040",
+      display: "flex",
+      padding: "8px 0 12px"
+    }
+  }, tabs.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    onClick: () => setTab(t.id),
+    style: {
+      flex: 1,
+      background: "none",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      gap: 3,
+      padding: "4px 0",
+      transition: "all 0.2s"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 18,
+      filter: tab === t.id ? `drop-shadow(0 0 8px ${ACCENT})` : "none",
+      transition: "all 0.2s",
+      color: tab === t.id ? ACCENT : MUTED
+    }
+  }, t.icon), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 9,
+      fontWeight: 600,
+      color: tab === t.id ? ACCENT : MUTED,
+      letterSpacing: "0.05em",
+      textTransform: "uppercase"
+    }
+  }, t.label)))));
+}
+
+// ─── LOGIN ────────────────────────────────────────────────────
+function LoginScreen({
+  onLogin
+}) {
+  const [phone, setPhone] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const handleSubmit = () => {
+    const clean = phone.replace(/\s/g, "");
+    setLoading(true);
+    setTimeout(() => {
+      const found = USERS[clean];
+      if (found) {
+        onLogin(found);
+      } else {
+        setError("Número no autorizado. Intenta de nuevo.");
+        setLoading(false);
+      }
+    }, 600);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: "'DM Sans', sans-serif",
+      background: BG,
+      minHeight: "100vh",
+      color: TEXT,
+      maxWidth: 430,
+      margin: "0 auto",
+      display: "flex",
+      flexDirection: "column",
+      justifyContent: "center",
+      padding: "0 24px"
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=Bebas+Neue&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        input { outline: none; }
+        button { cursor: pointer; border: none; }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes neonFlicker { 0%,100%{opacity:1;} 92%{opacity:1;} 93%{opacity:0.7;} 94%{opacity:1;} 97%{opacity:0.85;} 98%{opacity:1;} }
+        @keyframes neonPulse { 0%,100%{box-shadow:0 0 15px ${ACCENT}50,0 0 40px ${ACCENT}20;} 50%{box-shadow:0 0 30px ${ACCENT}80,0 0 80px ${ACCENT}40;} }
+        .fade-up { animation: fadeUp 0.5s ease forwards; }
+        .ring { animation: spin 1s linear infinite; }
+        .neon-logo { animation: neonFlicker 3s infinite; }
+        .neon-btn { animation: neonPulse 2s infinite; }
+      `), /*#__PURE__*/React.createElement("div", {
+    className: "fade-up"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 48
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 72,
+      height: 72,
+      borderRadius: 20,
+      background: `linear-gradient(135deg, ${ACCENT}, ${ACCENT3})`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 32,
+      margin: "0 auto 16px",
+      boxShadow: `0 0 30px ${ACCENT}60`
+    }
+  }, "\u26A1"), /*#__PURE__*/React.createElement("h1", {
+    className: "neon-logo",
+    style: {
+      fontFamily: "'Bebas Neue', sans-serif",
+      fontSize: 48,
+      letterSpacing: "0.1em",
+      color: TEXT,
+      textShadow: `0 0 20px ${ACCENT}80, 0 0 40px ${ACCENT}40`,
+      lineHeight: 1
+    }
+  }, "VITAL", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: ACCENT
+    }
+  }, "TRACK")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 13,
+      marginTop: 6,
+      letterSpacing: "0.05em"
+    }
+  }, "Tu salud, a tu ritmo")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 24,
+      padding: 28,
+      border: `1px solid ${ACCENT}30`,
+      boxShadow: `0 0 40px ${ACCENT}10`
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em",
+      marginBottom: 8
+    }
+  }, "INGRESA TU N\xDAMERO"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 14,
+      color: TEXT,
+      marginBottom: 20,
+      lineHeight: 1.5
+    }
+  }, "Escribe tu n\xFAmero de celular para acceder a tu perfil."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "relative",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: phone,
+    onChange: e => {
+      setPhone(e.target.value.replace(/\D/g, "").slice(0, 10));
+      setError("");
+    },
+    onKeyDown: e => e.key === "Enter" && handleSubmit(),
+    placeholder: "Ej: 3124217452",
+    type: "tel",
+    maxLength: 10,
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: `1px solid ${error ? ACCENT : "#3D1A5A"}`,
+      borderRadius: 14,
+      padding: "16px 18px",
+      color: TEXT,
+      fontSize: 20,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em"
+    }
+  }), phone.length === 10 && !error && /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: "absolute",
+      right: 14,
+      top: "50%",
+      transform: "translateY(-50%)",
+      color: ACCENT,
+      fontSize: 18
+    }
+  }, "\u2713")), error && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT2,
+      fontSize: 12,
+      marginBottom: 14,
+      textAlign: "center"
+    }
+  }, "\u26A0 ", error), /*#__PURE__*/React.createElement("button", {
+    onClick: handleSubmit,
+    disabled: phone.length < 10 || loading,
+    className: phone.length === 10 && !loading ? "neon-btn" : "",
+    style: {
+      width: "100%",
+      background: phone.length === 10 ? `linear-gradient(135deg, ${ACCENT}, ${ACCENT3})` : CARD2,
+      color: phone.length === 10 ? "#fff" : MUTED,
+      borderRadius: 14,
+      padding: "16px",
+      fontSize: 15,
+      fontWeight: 700,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10
+    }
+  }, loading ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "ring",
+    style: {
+      width: 20,
+      height: 20,
+      border: `2px solid ${ACCENT}`,
+      borderTopColor: "transparent",
+      borderRadius: "50%"
+    }
+  }), "Verificando...") : "Entrar →")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      textAlign: "center",
+      color: MUTED,
+      fontSize: 11,
+      marginTop: 24,
+      lineHeight: 1.6
+    }
+  }, "Solo ingresan usuarios registrados.", /*#__PURE__*/React.createElement("br", null), "No se requiere contrase\xF1a.")));
+}
+
+// ─── DASHBOARD ────────────────────────────────────────────────
+function Dashboard({
+  data,
+  today,
+  todayCalories,
+  todayCaloriesBurned,
+  todayMeals,
+  todayExercise,
+  user,
+  weeklyGoals,
+  allUsersData
+}) {
+  const {
+    goals,
+    weightLog
+  } = data;
+  const calorieGoal = goals.dailyCalories || 1800;
+  const calPct = Math.min(todayCalories / calorieGoal * 100, 100);
+  const netCal = todayCalories - todayCaloriesBurned;
+  const last7 = weightLog.slice(-7);
+  const currentWeight = weightLog.length > 0 ? weightLog[weightLog.length - 1].weight : goals.currentWeight || "—";
+  const weightDiff = weightLog.length >= 2 ? (weightLog[weightLog.length - 1].weight - weightLog[weightLog.length - 2].weight).toFixed(1) : null;
+  const weekResults = evaluateWeeklyGoals(weeklyGoals, allUsersData);
+  const passedCount = Object.values(weekResults).filter(r => r && r.passed === true).length;
+  const totalActive = Object.values(weekResults).filter(r => r && r.passed !== null).length;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      padding: "16px 16px 0"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 12,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em"
+    }
+  }, new Date().toLocaleDateString("es-CO", {
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  }).toUpperCase()), /*#__PURE__*/React.createElement("h1", {
+    className: "neon-title",
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      marginTop: 4,
+      textShadow: `0 0 20px ${ACCENT}80`
+    }
+  }, "Hola, ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: ACCENT,
+      textShadow: `0 0 12px ${ACCENT}`
+    }
+  }, user.name.split(" ")[0]))), totalActive > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: passedCount === totalActive ? `${ACCENT}20` : CARD,
+      borderRadius: 16,
+      padding: "12px 16px",
+      marginBottom: 16,
+      border: `1px solid ${passedCount === totalActive ? ACCENT : "#2D1040"}`,
+      display: "flex",
+      alignItems: "center",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 24
+    }
+  }, passedCount === totalActive ? "🏆" : passedCount > 0 ? "💪" : "🎯"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, "Metas esta semana"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: MUTED,
+      marginTop: 2
+    }
+  }, passedCount, " de ", totalActive, " metas van bien")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginLeft: "auto",
+      textAlign: "right"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 22,
+      fontWeight: 700,
+      color: passedCount === totalActive ? ACCENT : ACCENT2
+    }
+  }, Math.round(passedCount / Math.max(totalActive, 1) * 100), "%"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 20,
+      marginBottom: 16,
+      border: `1px solid ${ACCENT}40`,
+      boxShadow: `0 0 20px ${ACCENT}15`,
+      display: "flex",
+      alignItems: "center",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement(CalorieRing, {
+    pct: calPct,
+    calories: todayCalories,
+    goal: calorieGoal
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.08em"
+    }
+  }, "CALOR\xCDAS NETAS"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 32,
+      fontWeight: 700,
+      fontFamily: "'Space Mono', monospace",
+      color: netCal > calorieGoal ? ACCENT2 : ACCENT
+    }
+  }, netCal), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, "quemadas: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: TEXT
+    }
+  }, todayCaloriesBurned, " kcal")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(MacroPill, {
+    label: "P",
+    value: todayMeals.reduce((s, m) => s + (m.protein || 0), 0),
+    goal: goals.protein,
+    color: "#FF2D6B"
+  }), /*#__PURE__*/React.createElement(MacroPill, {
+    label: "C",
+    value: todayMeals.reduce((s, m) => s + (m.carbs || 0), 0),
+    goal: goals.carbs,
+    color: "#FFD600"
+  }), /*#__PURE__*/React.createElement(MacroPill, {
+    label: "G",
+    value: todayMeals.reduce((s, m) => s + (m.fats || 0), 0),
+    goal: goals.fats,
+    color: "#B026FF"
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 12,
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em"
+    }
+  }, "PESO ACTUAL"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      fontFamily: "'Space Mono', monospace",
+      marginTop: 4
+    }
+  }, currentWeight, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: MUTED
+    }
+  }, " kg")), weightDiff !== null && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      marginTop: 4,
+      color: parseFloat(weightDiff) <= 0 ? ACCENT : ACCENT2
+    }
+  }, parseFloat(weightDiff) <= 0 ? "▼" : "▲", " ", Math.abs(weightDiff), " kg"), goals.targetWeight && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 10,
+      color: MUTED,
+      marginTop: 4
+    }
+  }, "Meta: ", goals.targetWeight, " kg")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em"
+    }
+  }, "EJERCICIO HOY"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, todayExercise.completed ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: ACCENT,
+      fontWeight: 600
+    }
+  }, "\u2713 Completado") : /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: MUTED
+    }
+  }, "Pendiente"), todayExercise.logged?.length > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: MUTED,
+      marginTop: 4
+    }
+  }, todayExercise.logged.length, " actividad", todayExercise.logged.length > 1 ? "es" : "")))), last7.length >= 2 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em",
+      marginBottom: 12
+    }
+  }, "PROGRESO DE PESO \u2014 \xDALTIMOS 7 D\xCDAS"), /*#__PURE__*/React.createElement(MiniWeightChart, {
+    data: last7,
+    goal: goals.targetWeight
+  })), todayMeals.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em",
+      marginBottom: 12
+    }
+  }, "COMIDAS DE HOY"), todayMeals.slice(-3).map((m, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "8px 0",
+      borderBottom: i < Math.min(todayMeals.length, 3) - 1 ? "1px solid #2D1040" : "none"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10
+    }
+  }, m.thumbnail && /*#__PURE__*/React.createElement("img", {
+    src: m.thumbnail,
+    alt: "",
+    style: {
+      width: 36,
+      height: 36,
+      borderRadius: 8,
+      objectFit: "cover"
+    }
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 500
+    }
+  }, m.name), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: MUTED
+    }
+  }, m.mealTime))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 13,
+      color: ACCENT
+    }
+  }, m.calories, " kcal")))));
+}
+
+// ─── METAS TAB ────────────────────────────────────────────────
+function MetasTab({
+  weeklyGoals,
+  updateWeeklyGoals,
+  allUsersData,
+  user
+}) {
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({
+    ...weeklyGoals
+  });
+  const [saved, setSaved] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const weekDays = getWeekDays();
+  const weekStart = getWeekStart();
+  const weekEnd = weekDays[6];
+  const results = evaluateWeeklyGoals(weeklyGoals, allUsersData);
+
+  // Detectar si es nueva semana y resetear
+  useEffect(() => {
+    if (weeklyGoals.weekStart && weeklyGoals.weekStart !== weekStart) {
+      // Nueva semana — registrar resultados anteriores y resetear
+      const prevResults = evaluateWeeklyGoals(weeklyGoals, allUsersData);
+      syncToSheets(user.id, user.name, "weekly_results", weeklyGoals.weekStart, prevResults);
+      updateWeeklyGoals(prev => ({
+        ...prev,
+        weekStart,
+        results: prevResults
+      }));
+    } else if (!weeklyGoals.weekStart) {
+      updateWeeklyGoals(prev => ({
+        ...prev,
+        weekStart
+      }));
+    }
+  }, []);
+  const saveGoals = async () => {
+    setSyncing(true);
+    const updated = {
+      ...form,
+      weekStart
+    };
+    updateWeeklyGoals(() => updated);
+    await syncToSheets(user.id, user.name, "weekly_goals_update", todayKey(), updated);
+    setSyncing(false);
+    setSaved(true);
+    setEditing(false);
+    setTimeout(() => setSaved(false), 2000);
+  };
+  const metaCards = [{
+    key: "calories",
+    icon: "🔥",
+    title: "Calorías",
+    enabled: weeklyGoals.calories.enabled,
+    detail: `Máx ${weeklyGoals.calories.target} kcal/día · ${weeklyGoals.calories.days} días`,
+    result: results.calories
+  }, {
+    key: "exercise",
+    icon: "💪",
+    title: "Ejercicio",
+    enabled: weeklyGoals.exercise.enabled,
+    detail: `${weeklyGoals.exercise.daysPerWeek} días por semana`,
+    result: results.exercise
+  }, {
+    key: "weight",
+    icon: "⚖️",
+    title: "Peso",
+    enabled: weeklyGoals.weight.enabled,
+    detail: `Bajar ${weeklyGoals.weight.kgPerWeek} kg esta semana`,
+    result: results.weight
+  }, {
+    key: "macros",
+    icon: "🎯",
+    title: "Macros",
+    enabled: weeklyGoals.macros.enabled,
+    detail: `Registrar macros ≥5 días`,
+    result: results.macros
+  }];
+  const allDone = metaCards.filter(m => m.enabled).every(m => m.result?.passed === true);
+  const anyFailed = metaCards.filter(m => m.enabled).some(m => m.result?.passed === false);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      padding: "16px 16px 0"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-start",
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700
+    }
+  }, "Metas ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: ACCENT,
+      textShadow: `0 0 12px ${ACCENT}`
+    }
+  }, "semanales")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 12,
+      marginTop: 4,
+      fontFamily: "'Space Mono', monospace"
+    }
+  }, weekStart, " \u2192 ", weekEnd)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setForm({
+        ...weeklyGoals
+      });
+      setEditing(!editing);
+    },
+    style: {
+      background: editing ? CARD2 : `${ACCENT}20`,
+      color: editing ? MUTED : ACCENT,
+      borderRadius: 10,
+      padding: "8px 14px",
+      fontSize: 12,
+      fontWeight: 700,
+      border: `1px solid ${editing ? "#2D1040" : ACCENT}`
+    }
+  }, editing ? "Cancelar" : "✏️ Editar")), allDone && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: `linear-gradient(135deg, ${ACCENT}30, ${ACCENT3}20)`,
+      border: `1px solid ${ACCENT}60`,
+      borderRadius: 20,
+      padding: 20,
+      marginBottom: 20,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 28,
+      marginBottom: 8
+    }
+  }, "\uD83C\uDFC6"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700,
+      fontSize: 16,
+      color: ACCENT
+    }
+  }, "\xA1Semana perfecta!"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: TEXT,
+      marginTop: 8,
+      lineHeight: 1.6
+    }
+  }, "\uD83E\uDD70 \xA1Mi amor, lo logramos! Cumplimos todas las metas \u2014 \xA1somos un equipo incre\xEDble!")), !editing && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12,
+      marginBottom: 20
+    }
+  }, metaCards.filter(m => m.enabled).map(meta => {
+    const r = meta.result;
+    const passed = r?.passed === true;
+    const failed = r?.passed === false;
+    const pending = r?.passed === null || r?.passed === undefined;
+    const color = passed ? ACCENT : failed ? ACCENT2 : MUTED;
+    const bg = passed ? `${ACCENT}15` : failed ? `${ACCENT2}10` : CARD;
+    const border = passed ? `${ACCENT}50` : failed ? `${ACCENT2}40` : "#2D1040";
+    return /*#__PURE__*/React.createElement("div", {
+      key: meta.key,
+      style: {
+        background: bg,
+        borderRadius: 16,
+        padding: 16,
+        border: `1px solid ${border}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 24
+      }
+    }, meta.icon), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontWeight: 700,
+        fontSize: 15
+      }
+    }, meta.title), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        color: MUTED,
+        marginTop: 2
+      }
+    }, meta.detail)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: "right"
+      }
+    }, pending && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 20
+      }
+    }, "\u23F3"), passed && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 20
+      }
+    }, "\u2705"), failed && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 20
+      }
+    }, "\u274C"))), r && !pending && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 12,
+        background: CARD2,
+        borderRadius: 10,
+        padding: "10px 12px"
+      }
+    }, meta.key === "calories" && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        color
+      }
+    }, r.daysMet, " de ", r.needed, " d\xEDas dentro del l\xEDmite (", r.daysTracked, " d\xEDas registrados)"), meta.key === "exercise" && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        color
+      }
+    }, r.daysDone, " de ", r.needed, " d\xEDas con ejercicio esta semana"), meta.key === "weight" && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        color
+      }
+    }, r.diff > 0 ? `Bajaron ${r.diff} kg` : `Subieron ${Math.abs(r.diff)} kg`, " \xB7 Meta: ", r.needed, " kg"), meta.key === "macros" && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        color
+      }
+    }, r.daysMet, " d\xEDas con macros registrados")), (passed || failed) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 10,
+        padding: "10px 12px",
+        background: passed ? `${ACCENT}10` : `${ACCENT2}10`,
+        borderRadius: 10,
+        borderLeft: `3px solid ${color}`
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        color: TEXT,
+        lineHeight: 1.6
+      }
+    }, passed ? REWARDS[meta.key].win : REWARDS[meta.key].lose)));
+  })), editing && /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14,
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700
+    }
+  }, "\uD83D\uDD25 Calor\xEDas"), /*#__PURE__*/React.createElement(ToggleSwitch, {
+    value: form.calories.enabled,
+    onChange: v => setForm(p => ({
+      ...p,
+      calories: {
+        ...p.calories,
+        enabled: v
+      }
+    }))
+  })), form.calories.enabled && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      marginBottom: 6
+    }
+  }, "M\xE1x. kcal/d\xEDa"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: form.calories.target,
+    onChange: e => setForm(p => ({
+      ...p,
+      calories: {
+        ...p.calories,
+        target: parseInt(e.target.value) || 0
+      }
+    })),
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 10,
+      padding: "10px 12px",
+      color: TEXT,
+      fontSize: 15,
+      fontFamily: "'Space Mono', monospace"
+    }
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      marginBottom: 6
+    }
+  }, "D\xEDas por semana"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "1",
+    max: "7",
+    value: form.calories.days,
+    onChange: e => setForm(p => ({
+      ...p,
+      calories: {
+        ...p.calories,
+        days: parseInt(e.target.value) || 1
+      }
+    })),
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 10,
+      padding: "10px 12px",
+      color: TEXT,
+      fontSize: 15,
+      fontFamily: "'Space Mono', monospace"
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700
+    }
+  }, "\uD83D\uDCAA Ejercicio"), /*#__PURE__*/React.createElement(ToggleSwitch, {
+    value: form.exercise.enabled,
+    onChange: v => setForm(p => ({
+      ...p,
+      exercise: {
+        ...p.exercise,
+        enabled: v
+      }
+    }))
+  })), form.exercise.enabled && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      marginBottom: 6
+    }
+  }, "D\xEDas de ejercicio por semana"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "1",
+    max: "7",
+    value: form.exercise.daysPerWeek,
+    onChange: e => setForm(p => ({
+      ...p,
+      exercise: {
+        ...p.exercise,
+        daysPerWeek: parseInt(e.target.value) || 1
+      }
+    })),
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 10,
+      padding: "10px 12px",
+      color: TEXT,
+      fontSize: 15,
+      fontFamily: "'Space Mono', monospace"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700
+    }
+  }, "\u2696\uFE0F Peso"), /*#__PURE__*/React.createElement(ToggleSwitch, {
+    value: form.weight.enabled,
+    onChange: v => setForm(p => ({
+      ...p,
+      weight: {
+        ...p.weight,
+        enabled: v
+      }
+    }))
+  })), form.weight.enabled && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      marginBottom: 6
+    }
+  }, "Kg a bajar esta semana"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    step: "0.1",
+    min: "0.1",
+    value: form.weight.kgPerWeek,
+    onChange: e => setForm(p => ({
+      ...p,
+      weight: {
+        ...p.weight,
+        kgPerWeek: parseFloat(e.target.value) || 0.5
+      }
+    })),
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 10,
+      padding: "10px 12px",
+      color: TEXT,
+      fontSize: 15,
+      fontFamily: "'Space Mono', monospace"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700
+    }
+  }, "\uD83C\uDFAF Macros"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: MUTED,
+      marginTop: 4
+    }
+  }, "Registrar macros al menos 5 d\xEDas")), /*#__PURE__*/React.createElement(ToggleSwitch, {
+    value: form.macros.enabled,
+    onChange: v => setForm(p => ({
+      ...p,
+      macros: {
+        ...p.macros,
+        enabled: v
+      }
+    }))
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: saveGoals,
+    style: {
+      width: "100%",
+      background: `linear-gradient(135deg, ${ACCENT}, ${ACCENT3})`,
+      color: "#fff",
+      borderRadius: 14,
+      padding: "16px",
+      fontSize: 15,
+      fontWeight: 700,
+      boxShadow: `0 8px 32px ${ACCENT}40`
+    }
+  }, syncing ? "Guardando..." : saved ? "✓ Guardado" : "Guardar metas de la semana")), weeklyGoals.results && Object.keys(weeklyGoals.results).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700,
+      fontSize: 14,
+      marginBottom: 12,
+      color: MUTED
+    }
+  }, "\uD83D\uDCCB Semana anterior"), Object.entries(weeklyGoals.results).map(([key, r]) => r && /*#__PURE__*/React.createElement("div", {
+    key: key,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "6px 0",
+      borderBottom: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, key === "calories" ? "🔥 Calorías" : key === "exercise" ? "💪 Ejercicio" : key === "weight" ? "⚖️ Peso" : "🎯 Macros"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 16
+    }
+  }, r.passed === true ? "✅" : r.passed === false ? "❌" : "⏳")))));
+}
+
+// ─── TOGGLE SWITCH ────────────────────────────────────────────
+function ToggleSwitch({
+  value,
+  onChange
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: () => onChange(!value),
+    style: {
+      width: 44,
+      height: 24,
+      borderRadius: 12,
+      background: value ? ACCENT : CARD2,
+      border: `1px solid ${value ? ACCENT : "#3D1A5A"}`,
+      cursor: "pointer",
+      position: "relative",
+      transition: "all 0.2s",
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 18,
+      height: 18,
+      borderRadius: "50%",
+      background: "#fff",
+      position: "absolute",
+      top: 2,
+      left: value ? 22 : 2,
+      transition: "left 0.2s",
+      boxShadow: value ? `0 0 6px ${ACCENT}` : "none"
+    }
+  }));
+}
+
+// ─── CALORIE RING ─────────────────────────────────────────────
+function CalorieRing({
+  pct,
+  calories,
+  goal
+}) {
+  const r = 42,
+    cx = 50,
+    cy = 50,
+    circ = 2 * Math.PI * r;
+  const dash = pct / 100 * circ;
+  return /*#__PURE__*/React.createElement("svg", {
+    width: 100,
+    height: 100,
+    viewBox: "0 0 100 100"
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: cx,
+    cy: cy,
+    r: r,
+    fill: "none",
+    stroke: "#2D1040",
+    strokeWidth: 8
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: cx,
+    cy: cy,
+    r: r,
+    fill: "none",
+    stroke: pct > 100 ? ACCENT2 : ACCENT,
+    strokeWidth: 8,
+    strokeDasharray: `${dash} ${circ}`,
+    strokeDashoffset: circ / 4,
+    strokeLinecap: "round",
+    style: {
+      filter: `drop-shadow(0 0 6px ${pct > 100 ? ACCENT2 : ACCENT})`
+    }
+  }), /*#__PURE__*/React.createElement("text", {
+    x: cx,
+    y: cy - 4,
+    textAnchor: "middle",
+    fill: TEXT,
+    fontSize: 14,
+    fontFamily: "Space Mono",
+    fontWeight: "700"
+  }, Math.round(pct), "%"), /*#__PURE__*/React.createElement("text", {
+    x: cx,
+    y: cy + 10,
+    textAnchor: "middle",
+    fill: MUTED,
+    fontSize: 7,
+    fontFamily: "DM Sans"
+  }, "de ", goal));
+}
+function MacroPill({
+  label,
+  value,
+  goal,
+  color
+}) {
+  const pct = goal ? Math.min(value / goal * 100, 100) : 0;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      marginBottom: 2
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 9,
+      color,
+      fontWeight: 700
+    }
+  }, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 9,
+      color: MUTED
+    }
+  }, value, "g")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 3,
+      background: "#2D1040",
+      borderRadius: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: "100%",
+      width: `${pct}%`,
+      background: color,
+      borderRadius: 10
+    }
+  })));
+}
+function MiniWeightChart({
+  data,
+  goal
+}) {
+  const weights = data.map(d => d.weight);
+  const min = Math.min(...weights) - 0.5,
+    max = Math.max(...weights) + 0.5;
+  const w = 280,
+    h = 70;
+  const pts = data.map((d, i) => {
+    const x = i / (data.length - 1) * (w - 20) + 10;
+    const y = h - (d.weight - min) / (max - min) * (h - 10) - 5;
+    return `${x},${y}`;
+  });
+  const pathD = "M " + pts.join(" L ");
+  const goalY = goal ? h - (parseFloat(goal) - min) / (max - min) * (h - 10) - 5 : null;
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    viewBox: `0 0 ${w} ${h}`,
+    style: {
+      overflow: "visible"
+    }
+  }, goalY && /*#__PURE__*/React.createElement("line", {
+    x1: 10,
+    y1: goalY,
+    x2: w - 10,
+    y2: goalY,
+    stroke: ACCENT,
+    strokeWidth: 1,
+    strokeDasharray: "4 4",
+    opacity: 0.4
+  }), /*#__PURE__*/React.createElement("path", {
+    d: pathD,
+    fill: "none",
+    stroke: ACCENT,
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }), data.map((d, i) => {
+    const [x, y] = pts[i].split(",");
+    return /*#__PURE__*/React.createElement("circle", {
+      key: i,
+      cx: x,
+      cy: y,
+      r: 3,
+      fill: ACCENT,
+      style: {
+        filter: `drop-shadow(0 0 4px ${ACCENT})`
+      }
+    });
+  }), data.map((d, i) => {
+    const [x] = pts[i].split(",");
+    return i % 2 === 0 && /*#__PURE__*/React.createElement("text", {
+      key: i,
+      x: x,
+      y: h + 2,
+      textAnchor: "middle",
+      fill: MUTED,
+      fontSize: 7,
+      fontFamily: "Space Mono"
+    }, d.date.slice(5));
+  }));
+}
+
+// ─── FOOD TAB ─────────────────────────────────────────────────
+function FoodTab({
+  data,
+  update,
+  today,
+  todayMeals,
+  todayCalories,
+  user
+}) {
+  const [image, setImage] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [result, setResult] = useState(null);
+  const [mealTime, setMealTime] = useState("Almuerzo");
+  const [weightInput, setWeightInput] = useState(data.weightLog.length > 0 ? "" : data.goals.currentWeight || "");
+  const [savingWeight, setSavingWeight] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+  const [stream, setStream] = useState(null);
+  const videoRef = useRef(),
+    canvasRef = useRef(),
+    fileRef = useRef();
+  const mealTimes = ["Desayuno", "Media mañana", "Almuerzo", "Merienda", "Cena"];
+  const openCamera = async () => {
+    setCameraError(null);
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment"
+        },
+        audio: false
+      });
+      setStream(s);
+      setCameraOpen(true);
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = s;
+      }, 100);
+    } catch {
+      setCameraError("No se pudo acceder a la cámara. Usa 'Seleccionar foto'.");
+    }
+  };
+  const closeCamera = () => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    setStream(null);
+    setCameraOpen(false);
+  };
+  const capturePhoto = () => {
+    const video = videoRef.current,
+      canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    closeCamera();
+    setImage(dataUrl);
+    analyzeFoodBase64(dataUrl.split(",")[1], "image/jpeg");
+  };
+  const analyzeFood = async file => {
+    setAnalyzing(true);
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = async e => {
+      await analyzeFoodBase64(e.target.result.split(",")[1], file.type);
+    };
+    reader.readAsDataURL(file);
+  };
+  const analyzeFoodBase64 = async (base64, mediaType) => {
+    setAnalyzing(true);
+    setResult(null);
+    try {
+      const res = await fetch("/.netlify/functions/claude", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: [{
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: mediaType,
+                data: base64
+              }
+            }, {
+              type: "text",
+              text: `Analiza esta foto de comida y responde SOLO con JSON válido sin markdown:\n{"name":"nombre","calories":número,"protein":gramos,"carbs":gramos,"fats":gramos,"portions":"descripción","confidence":"alta/media/baja","tip":"consejo breve"}`
+            }]
+          }]
+        })
+      });
+      const json = await res.json();
+      setResult(JSON.parse((json.content?.[0]?.text || "").replace(/```json|```/g, "").trim()));
+    } catch {
+      setResult({
+        error: "No pude analizar la imagen. Intenta con otra foto."
+      });
+    }
+    setAnalyzing(false);
+  };
+  const handleFile = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImage(URL.createObjectURL(file));
+    analyzeFood(file);
+    e.target.value = "";
+  };
+  const addMeal = () => {
+    if (!result || result.error) return;
+    const meal = {
+      ...result,
+      mealTime,
+      time: new Date().toLocaleTimeString("es-CO", {
+        hour: "2-digit",
+        minute: "2-digit"
+      }),
+      thumbnail: image,
+      id: Date.now()
+    };
+    update(prev => ({
+      ...prev,
+      meals: {
+        ...prev.meals,
+        [today]: [...(prev.meals[today] || []), meal]
+      }
+    }));
+    syncToSheets(user.id, user.name, "meal", today, meal);
+    setResult(null);
+    setImage(null);
+  };
+  const saveWeight = () => {
+    if (!weightInput) return;
+    const entry = {
+      date: today,
+      weight: parseFloat(weightInput)
+    };
+    update(prev => {
+      const existing = prev.weightLog.filter(w => w.date !== today);
+      return {
+        ...prev,
+        weightLog: [...existing, entry].sort((a, b) => a.date.localeCompare(b.date)),
+        goals: {
+          ...prev.goals,
+          currentWeight: parseFloat(weightInput)
+        }
+      };
+    });
+    syncToSheets(user.id, user.name, "weight", today, entry);
+    setSavingWeight(false);
+    setWeightInput("");
+  };
+  const todayWeightEntry = data.weightLog.find(w => w.date === today);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      padding: "16px 16px 0"
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      marginBottom: 4
+    }
+  }, "Registrar ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: ACCENT,
+      textShadow: `0 0 12px ${ACCENT}`
+    }
+  }, "comida")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 13,
+      marginBottom: 20
+    }
+  }, "Toma una foto y te digo las calor\xEDas"), cameraOpen && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "#000",
+      zIndex: 1000,
+      display: "flex",
+      flexDirection: "column"
+    }
+  }, /*#__PURE__*/React.createElement("video", {
+    ref: videoRef,
+    autoPlay: true,
+    playsInline: true,
+    style: {
+      flex: 1,
+      width: "100%",
+      objectFit: "cover"
+    }
+  }), /*#__PURE__*/React.createElement("canvas", {
+    ref: canvasRef,
+    style: {
+      display: "none"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "20px 24px 36px",
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      background: "rgba(0,0,0,0.8)"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: closeCamera,
+    style: {
+      background: "#333",
+      color: TEXT,
+      borderRadius: "50%",
+      width: 50,
+      height: 50,
+      fontSize: 20
+    }
+  }, "\u2715"), /*#__PURE__*/React.createElement("button", {
+    onClick: capturePhoto,
+    style: {
+      background: TEXT,
+      borderRadius: "50%",
+      width: 70,
+      height: 70,
+      border: `4px solid ${ACCENT}`,
+      boxShadow: `0 0 20px ${ACCENT}`
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 50
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.1em"
+    }
+  }, "PESO DE HOY"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      fontFamily: "'Space Mono', monospace",
+      marginTop: 2
+    }
+  }, todayWeightEntry ? `${todayWeightEntry.weight} kg` : "Sin registrar")), !savingWeight ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSavingWeight(true),
+    style: {
+      background: ACCENT,
+      color: "#fff",
+      borderRadius: 10,
+      padding: "8px 14px",
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, todayWeightEntry ? "Actualizar" : "+ Peso") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: weightInput,
+    onChange: e => setWeightInput(e.target.value),
+    placeholder: "kg",
+    type: "number",
+    style: {
+      width: 70,
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 8,
+      padding: "6px 10px",
+      color: TEXT,
+      fontSize: 14
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: saveWeight,
+    style: {
+      background: ACCENT,
+      color: "#fff",
+      borderRadius: 8,
+      padding: "7px 12px",
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, "OK"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSavingWeight(false),
+    style: {
+      background: "#2D1040",
+      color: MUTED,
+      borderRadius: 8,
+      padding: "7px 10px",
+      fontSize: 12
+    }
+  }, "\u2715")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 16,
+      overflowX: "auto",
+      paddingBottom: 4
+    }
+  }, mealTimes.map(m => /*#__PURE__*/React.createElement("button", {
+    key: m,
+    onClick: () => setMealTime(m),
+    style: {
+      whiteSpace: "nowrap",
+      padding: "7px 14px",
+      borderRadius: 20,
+      fontSize: 12,
+      fontWeight: 600,
+      background: mealTime === m ? ACCENT : CARD2,
+      color: mealTime === m ? "#fff" : MUTED,
+      border: "1px solid",
+      borderColor: mealTime === m ? ACCENT : "#2D1040",
+      transition: "all 0.2s"
+    }
+  }, m))), /*#__PURE__*/React.createElement("input", {
+    ref: fileRef,
+    type: "file",
+    accept: "image/*",
+    onChange: handleFile,
+    style: {
+      display: "none"
+    }
+  }), !image ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    onClick: openCamera,
+    style: {
+      width: "100%",
+      height: 140,
+      background: CARD,
+      border: `2px dashed ${ACCENT}50`,
+      borderRadius: 20,
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+      cursor: "pointer",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 36
+    }
+  }, "\uD83D\uDCF7"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: TEXT,
+      fontSize: 14,
+      fontWeight: 600
+    }
+  }, "Abrir c\xE1mara")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => fileRef.current.click(),
+    style: {
+      width: "100%",
+      height: 60,
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 16,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 20
+    }
+  }, "\uD83D\uDDBC\uFE0F"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 13
+    }
+  }, "Seleccionar de galer\xEDa")), cameraError && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT2,
+      fontSize: 12,
+      textAlign: "center",
+      marginTop: 10
+    }
+  }, cameraError)) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "relative",
+      borderRadius: 20,
+      overflow: "hidden",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: image,
+    alt: "food",
+    style: {
+      width: "100%",
+      height: 220,
+      objectFit: "cover",
+      display: "block"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setImage(null);
+      setResult(null);
+    },
+    style: {
+      position: "absolute",
+      top: 10,
+      right: 10,
+      background: "rgba(0,0,0,0.6)",
+      color: TEXT,
+      border: "none",
+      borderRadius: "50%",
+      width: 32,
+      height: 32,
+      fontSize: 14,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, "\u2715"), analyzing && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      inset: 0,
+      background: "rgba(13,5,16,0.85)",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ring",
+    style: {
+      width: 36,
+      height: 36,
+      border: `3px solid ${ACCENT}`,
+      borderTopColor: "transparent",
+      borderRadius: "50%"
+    }
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "Analizando tu plato..."))), result && !result.error && /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 20,
+      marginTop: 16,
+      border: `1px solid ${ACCENT}40`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-start",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700,
+      fontSize: 17
+    }
+  }, result.name), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      marginTop: 2
+    }
+  }, result.portions, " \xB7 Confianza: ", result.confidence)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "right"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 24,
+      fontWeight: 700,
+      color: ACCENT
+    }
+  }, result.calories), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10
+    }
+  }, "kcal"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 8,
+      marginBottom: 14
+    }
+  }, [["Proteína", result.protein, "#FF2D6B"], ["Carbos", result.carbs, "#FFD600"], ["Grasas", result.fats, "#B026FF"]].map(([l, v, c]) => /*#__PURE__*/React.createElement("div", {
+    key: l,
+    style: {
+      background: CARD2,
+      borderRadius: 10,
+      padding: "10px",
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700,
+      fontFamily: "'Space Mono', monospace",
+      color: c
+    }
+  }, v, "g"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 10,
+      color: MUTED,
+      marginTop: 2
+    }
+  }, l)))), result.tip && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: MUTED,
+      background: CARD2,
+      borderRadius: 10,
+      padding: "10px 12px",
+      lineHeight: 1.5,
+      marginBottom: 14
+    }
+  }, "\uD83D\uDCA1 ", result.tip), /*#__PURE__*/React.createElement("button", {
+    onClick: addMeal,
+    style: {
+      width: "100%",
+      background: ACCENT,
+      color: "#fff",
+      borderRadius: 12,
+      padding: "13px",
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, "Agregar a ", mealTime)), result?.error && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT2,
+      fontSize: 13,
+      textAlign: "center",
+      marginTop: 12
+    }
+  }, result.error), todayMeals.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 24
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700,
+      fontSize: 16
+    }
+  }, "Comidas de hoy"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 14,
+      color: ACCENT
+    }
+  }, todayCalories, " kcal")), todayMeals.map((m, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: CARD,
+      borderRadius: 14,
+      padding: "12px 14px",
+      marginBottom: 8,
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      border: "1px solid #2D1040"
+    }
+  }, m.thumbnail && /*#__PURE__*/React.createElement("img", {
+    src: m.thumbnail,
+    alt: "",
+    style: {
+      width: 44,
+      height: 44,
+      borderRadius: 10,
+      objectFit: "cover"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, m.name), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: MUTED
+    }
+  }, m.mealTime, " \xB7 ", m.time)), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 14,
+      color: ACCENT
+    }
+  }, m.calories)))));
+}
+
+// ─── EXERCISE TAB ─────────────────────────────────────────────
+function ExerciseTab({
+  data,
+  update,
+  today,
+  todayExercise,
+  user
+}) {
+  const [loading, setLoading] = useState(false);
+  const [recommendation, setRecommendation] = useState(todayExercise.recommendation || null);
+  const [showLog, setShowLog] = useState(false);
+  const [logForm, setLogForm] = useState({
+    type: "",
+    duration: "",
+    burned: ""
+  });
+  const getRecommendation = async () => {
+    setLoading(true);
+    const {
+      goals,
+      weightLog
+    } = data;
+    const last7 = weightLog.slice(-7);
+    const weightTrend = last7.length >= 2 ? (last7[last7.length - 1].weight - last7[0].weight).toFixed(1) : null;
+    const prompt = `Soy usuario de una app de salud.\nPeso actual: ${goals.currentWeight || "desconocido"} kg\nPeso meta: ${goals.targetWeight || "no definido"} kg\nNivel de actividad: ${goals.activityLevel || "moderado"}\nTendencia de peso: ${weightTrend !== null ? `${weightTrend > 0 ? "+" : ""}${weightTrend} kg` : "sin datos"}\nDías con ejercicio: ${Object.keys(data.exercise || {}).length}\n\nDame una recomendación de ejercicio para HOY. Responde SOLO con JSON sin markdown:\n{"title":"nombre","duration":"minutos","intensity":"baja/moderada/alta","burned":número,"exercises":["ej1","ej2","ej3"],"reason":"motivo 2 oraciones","tip":"consejo motivacional"}`;
+    try {
+      const res = await fetch("/.netlify/functions/claude", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: prompt
+          }]
+        })
+      });
+      const json = await res.json();
+      const parsed = JSON.parse((json.content?.[0]?.text || "").replace(/```json|```/g, "").trim());
+      setRecommendation(parsed);
+      update(prev => ({
+        ...prev,
+        exercise: {
+          ...prev.exercise,
+          [today]: {
+            ...(prev.exercise[today] || {}),
+            recommendation: parsed
+          }
+        }
+      }));
+    } catch {
+      setRecommendation({
+        error: "No se pudo generar recomendación. Intenta de nuevo."
+      });
+    }
+    setLoading(false);
+  };
+  const markCompleted = () => {
+    const entry = {
+      type: recommendation?.title || "Rutina recomendada",
+      duration: recommendation?.duration || "30 min",
+      burned: recommendation?.burned || 200,
+      time: new Date().toLocaleTimeString("es-CO", {
+        hour: "2-digit",
+        minute: "2-digit"
+      })
+    };
+    update(prev => ({
+      ...prev,
+      exercise: {
+        ...prev.exercise,
+        [today]: {
+          ...(prev.exercise[today] || {}),
+          completed: true,
+          logged: [...(prev.exercise[today]?.logged || []), entry]
+        }
+      }
+    }));
+    syncToSheets(user.id, user.name, "exercise", today, {
+      ...entry,
+      completed: true
+    });
+  };
+  const logCustom = () => {
+    if (!logForm.type) return;
+    const entry = {
+      ...logForm,
+      burned: parseInt(logForm.burned) || 0,
+      time: new Date().toLocaleTimeString("es-CO", {
+        hour: "2-digit",
+        minute: "2-digit"
+      })
+    };
+    update(prev => ({
+      ...prev,
+      exercise: {
+        ...prev.exercise,
+        [today]: {
+          ...(prev.exercise[today] || {}),
+          logged: [...(prev.exercise[today]?.logged || []), entry]
+        }
+      }
+    }));
+    syncToSheets(user.id, user.name, "exercise", today, entry);
+    setLogForm({
+      type: "",
+      duration: "",
+      burned: ""
+    });
+    setShowLog(false);
+  };
+  const intensityColor = {
+    baja: "#FF2D6B",
+    moderada: "#FFD600",
+    alta: ACCENT2
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      padding: "16px 16px 0"
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      marginBottom: 4
+    }
+  }, "Ejercicio ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: ACCENT,
+      textShadow: `0 0 12px ${ACCENT}`
+    }
+  }, "de hoy")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 13,
+      marginBottom: 20
+    }
+  }, "Recomendaci\xF3n personalizada seg\xFAn tu progreso"), !recommendation && !loading && /*#__PURE__*/React.createElement("button", {
+    onClick: getRecommendation,
+    className: "neon-btn",
+    style: {
+      width: "100%",
+      background: `linear-gradient(135deg, ${ACCENT}, ${ACCENT3})`,
+      color: "#fff",
+      borderRadius: 16,
+      padding: "18px",
+      fontSize: 15,
+      fontWeight: 700,
+      marginBottom: 20
+    }
+  }, "\u2726 Generar mi rutina de hoy"), loading && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 32,
+      textAlign: "center",
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ring",
+    style: {
+      width: 40,
+      height: 40,
+      border: `3px solid ${ACCENT}`,
+      borderTopColor: "transparent",
+      borderRadius: "50%",
+      margin: "0 auto 16px"
+    }
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT,
+      fontWeight: 600
+    }
+  }, "Analizando tu progreso..."), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 12,
+      marginTop: 6
+    }
+  }, "Creando rutina personalizada")), recommendation && !recommendation.error && /*#__PURE__*/React.createElement("div", {
+    className: "fade-up"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 20,
+      marginBottom: 16,
+      border: `1px solid ${ACCENT}50`,
+      boxShadow: `0 0 30px ${ACCENT}20`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-start",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 19,
+      fontWeight: 700
+    }
+  }, recommendation.title), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: CARD2,
+      borderRadius: 20,
+      padding: "3px 10px",
+      fontSize: 11,
+      color: MUTED
+    }
+  }, "\u23F1 ", recommendation.duration, " min"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: CARD2,
+      borderRadius: 20,
+      padding: "3px 10px",
+      fontSize: 11,
+      color: intensityColor[recommendation.intensity] || ACCENT
+    }
+  }, "\u25CF ", recommendation.intensity))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "right"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 22,
+      fontWeight: 700,
+      color: ACCENT2
+    }
+  }, recommendation.burned), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 10
+    }
+  }, "kcal est."))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: MUTED,
+      lineHeight: 1.6,
+      background: CARD2,
+      borderRadius: 10,
+      padding: "10px 12px",
+      marginBottom: 14
+    }
+  }, "\uD83D\uDCCA ", recommendation.reason), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, recommendation.exercises?.map((ex, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 0",
+      borderBottom: i < recommendation.exercises.length - 1 ? "1px solid #2D1040" : "none"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 22,
+      height: 22,
+      background: ACCENT,
+      borderRadius: "50%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 11,
+      fontWeight: 700,
+      color: "#fff",
+      flexShrink: 0
+    }
+  }, i + 1), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, ex)))), recommendation.tip && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: ACCENT,
+      fontStyle: "italic",
+      marginBottom: 14
+    }
+  }, "\uD83D\uDCAA ", recommendation.tip), !todayExercise.completed ? /*#__PURE__*/React.createElement("button", {
+    onClick: markCompleted,
+    style: {
+      width: "100%",
+      background: ACCENT,
+      color: "#fff",
+      borderRadius: 12,
+      padding: "13px",
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, "\u2713 Marcar como completado") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: `${ACCENT}15`,
+      border: `1px solid ${ACCENT}40`,
+      borderRadius: 12,
+      padding: 12,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT,
+      fontWeight: 700
+    }
+  }, "\u2713 \xA1Rutina completada hoy!"))), /*#__PURE__*/React.createElement("button", {
+    onClick: getRecommendation,
+    style: {
+      width: "100%",
+      background: CARD2,
+      color: MUTED,
+      borderRadius: 12,
+      padding: "11px",
+      fontSize: 13,
+      border: "1px solid #2D1040",
+      marginBottom: 16
+    }
+  }, "\u21BB Generar otra rutina")), recommendation?.error && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: ACCENT2,
+      fontSize: 13,
+      textAlign: "center",
+      marginBottom: 16
+    }
+  }, recommendation.error), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 16,
+      padding: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: showLog ? 14 : 0
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontWeight: 700,
+      fontSize: 15
+    }
+  }, "Registrar actividad"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowLog(!showLog),
+    style: {
+      background: CARD2,
+      color: MUTED,
+      borderRadius: 8,
+      padding: "6px 12px",
+      fontSize: 12
+    }
+  }, showLog ? "Cancelar" : "+ Agregar")), showLog && /*#__PURE__*/React.createElement("div", null, [["Actividad", "type", "text", "Ej: Caminar, Bici, Yoga..."], ["Duración", "duration", "text", "Ej: 30 min"], ["Cal. quemadas", "burned", "number", "Estimado"]].map(([label, key, type, ph]) => /*#__PURE__*/React.createElement("div", {
+    key: key,
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("input", {
+    value: logForm[key],
+    onChange: e => setLogForm(p => ({
+      ...p,
+      [key]: e.target.value
+    })),
+    placeholder: ph,
+    type: type,
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 10,
+      padding: "10px 12px",
+      color: TEXT,
+      fontSize: 13
+    }
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: logCustom,
+    style: {
+      width: "100%",
+      background: ACCENT,
+      color: "#fff",
+      borderRadius: 10,
+      padding: "11px",
+      fontSize: 13,
+      fontWeight: 700,
+      marginTop: 4
+    }
+  }, "Guardar")), todayExercise.logged?.length > 0 && !showLog && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10
+    }
+  }, todayExercise.logged.map((e, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      padding: "7px 0",
+      borderBottom: i < todayExercise.logged.length - 1 ? "1px solid #2D1040" : "none"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, e.type), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: MUTED
+    }
+  }, e.duration, " \xB7 ", e.time)), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'Space Mono', monospace",
+      fontSize: 13,
+      color: ACCENT2
+    }
+  }, "-", e.burned, " kcal"))))));
+}
+
+// ─── GOALS TAB ────────────────────────────────────────────────
+function GoalsTab({
+  data,
+  update,
+  user
+}) {
+  const [form, setForm] = useState({
+    ...data.goals
+  });
+  const [saved, setSaved] = useState(false);
+  const save = () => {
+    const parsed = {
+      ...form,
+      currentWeight: parseFloat(form.currentWeight) || form.currentWeight,
+      targetWeight: parseFloat(form.targetWeight) || form.targetWeight,
+      dailyCalories: parseInt(form.dailyCalories),
+      protein: parseInt(form.protein),
+      carbs: parseInt(form.carbs),
+      fats: parseInt(form.fats)
+    };
+    update(prev => ({
+      ...prev,
+      goals: parsed
+    }));
+    syncToSheets(user.id, user.name, "goals", todayKey(), parsed);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+  const activityLevels = [{
+    id: "sedentario",
+    label: "Sedentario",
+    desc: "Poco o ningún ejercicio"
+  }, {
+    id: "ligero",
+    label: "Ligero",
+    desc: "1–3 días por semana"
+  }, {
+    id: "moderado",
+    label: "Moderado",
+    desc: "3–5 días por semana"
+  }, {
+    id: "activo",
+    label: "Activo",
+    desc: "6–7 días por semana"
+  }];
+  const Field = ({
+    label,
+    field,
+    type = "number",
+    placeholder
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 11,
+      fontFamily: "'Space Mono', monospace",
+      letterSpacing: "0.05em",
+      marginBottom: 6
+    }
+  }, label), /*#__PURE__*/React.createElement("input", {
+    value: form[field] || "",
+    onChange: e => setForm(p => ({
+      ...p,
+      [field]: e.target.value
+    })),
+    type: type,
+    placeholder: placeholder,
+    style: {
+      width: "100%",
+      background: CARD2,
+      border: "1px solid #3D1A5A",
+      borderRadius: 12,
+      padding: "12px 14px",
+      color: TEXT,
+      fontSize: 15,
+      fontFamily: "'Space Mono', monospace"
+    }
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fade-up",
+    style: {
+      padding: "16px 16px 0"
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      marginBottom: 4
+    }
+  }, "Mis ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: ACCENT,
+      textShadow: `0 0 12px ${ACCENT}`
+    }
+  }, "objetivos")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: MUTED,
+      fontSize: 13,
+      marginBottom: 20
+    }
+  }, "Define tus metas para recibir recomendaciones personalizadas"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 20,
+      marginBottom: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 14,
+      color: ACCENT
+    }
+  }, "\u2696\uFE0F Peso"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "PESO ACTUAL (kg)",
+    field: "currentWeight",
+    placeholder: "ej: 75"
+  }), /*#__PURE__*/React.createElement(Field, {
+    label: "PESO META (kg)",
+    field: "targetWeight",
+    placeholder: "ej: 68"
+  })), form.currentWeight && form.targetWeight && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD2,
+      borderRadius: 10,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: MUTED
+    }
+  }, "Diferencia: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: parseFloat(form.targetWeight) < parseFloat(form.currentWeight) ? ACCENT : ACCENT2,
+      fontWeight: 700
+    }
+  }, (parseFloat(form.targetWeight) - parseFloat(form.currentWeight)).toFixed(1), " kg")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 20,
+      marginBottom: 16,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 14,
+      color: ACCENT
+    }
+  }, "\uD83C\uDF7D\uFE0F Nutrici\xF3n diaria"), /*#__PURE__*/React.createElement(Field, {
+    label: "CALOR\xCDAS OBJETIVO",
+    field: "dailyCalories",
+    placeholder: "ej: 1800"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "PROTE\xCDNA (g)",
+    field: "protein",
+    placeholder: "120"
+  }), /*#__PURE__*/React.createElement(Field, {
+    label: "CARBOS (g)",
+    field: "carbs",
+    placeholder: "200"
+  }), /*#__PURE__*/React.createElement(Field, {
+    label: "GRASAS (g)",
+    field: "fats",
+    placeholder: "60"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: CARD,
+      borderRadius: 20,
+      padding: 20,
+      marginBottom: 20,
+      border: "1px solid #2D1040"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 14,
+      color: ACCENT
+    }
+  }, "\uD83C\uDFC3 Nivel de actividad"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 8
+    }
+  }, activityLevels.map(a => /*#__PURE__*/React.createElement("button", {
+    key: a.id,
+    onClick: () => setForm(p => ({
+      ...p,
+      activityLevel: a.id
+    })),
+    style: {
+      background: form.activityLevel === a.id ? `${ACCENT}20` : CARD2,
+      border: `1px solid ${form.activityLevel === a.id ? ACCENT : "#3D1A5A"}`,
+      borderRadius: 12,
+      padding: "12px",
+      textAlign: "left",
+      transition: "all 0.2s"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      color: form.activityLevel === a.id ? ACCENT : TEXT
+    }
+  }, a.label), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 10,
+      color: MUTED,
+      marginTop: 2
+    }
+  }, a.desc))))), /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    style: {
+      width: "100%",
+      background: saved ? `${ACCENT}90` : ACCENT,
+      color: "#fff",
+      borderRadius: 16,
+      padding: "16px",
+      fontSize: 15,
+      fontWeight: 700,
+      transition: "all 0.3s",
+      boxShadow: `0 8px 32px ${ACCENT}50`,
+      marginBottom: 8
+    }
+  }, saved ? "✓ Guardado" : "Guardar objetivos"));
+}
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
